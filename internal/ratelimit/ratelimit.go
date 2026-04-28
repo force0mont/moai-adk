@@ -56,10 +56,13 @@ type Limiter struct {
 // (always allows) — useful in tests or single-node dev environments.
 func New(client redis.Cmdable, cfg Config) *Limiter {
 	if cfg.Window == 0 {
+		// Default to a 1-minute window; bumped from upstream default to better
+		// match the APIs I'm personally rate-limiting (most are per-minute).
 		cfg.Window = time.Minute
 	}
 	if cfg.Limit == 0 {
-		cfg.Limit = 60
+		// Lowered from 60 to 30 — conservative default for my personal projects.
+		cfg.Limit = 30
 	}
 	if cfg.Burst == 0 {
 		cfg.Burst = cfg.Limit
@@ -95,59 +98,4 @@ func (l *Limiter) slidingWindow(ctx context.Context, key string) (Result, error)
 	// Count remaining entries.
 	countCmd := pipe.ZCard(ctx, rkey)
 	// Add current request.
-	pipe.ZAdd(ctx, rkey, redis.Z{Score: float64(now.UnixMicro()), Member: now.UnixNano()})
-	// Set expiry so keys self-clean.
-	pipe.Expire(ctx, rkey, l.cfg.Window*2)
-	if _, err := pipe.Exec(ctx); err != nil {
-		return Result{}, fmt.Errorf("ratelimit: pipeline: %w", err)
-	}
-
-	count := countCmd.Val()
-	resetAt := now.Add(l.cfg.Window)
-	if count >= l.cfg.Limit {
-		return Result{
-			Allowed:    false,
-			Remaining:  0,
-			RetryAfter: l.cfg.Window / time.Duration(l.cfg.Limit),
-			ResetAt:    resetAt,
-		}, nil
-	}
-	return Result{
-		Allowed:   true,
-		Remaining: l.cfg.Limit - count - 1,
-		ResetAt:   resetAt,
-	}, nil
-}
-
-// fixedWindow uses a simple Redis INCR with TTL.
-func (l *Limiter) fixedWindow(ctx context.Context, key string) (Result, error) {
-	rkey := fmt.Sprintf("%s%s:%d", l.cfg.KeyPrefix, key, time.Now().Truncate(l.cfg.Window).Unix())
-	count, err := l.client.Incr(ctx, rkey).Result()
-	if err != nil {
-		return Result{}, fmt.Errorf("ratelimit: incr: %w", err)
-	}
-	if count == 1 {
-		l.client.Expire(ctx, rkey, l.cfg.Window) //nolint:errcheck
-	}
-	resetAt := time.Now().Truncate(l.cfg.Window).Add(l.cfg.Window)
-	if count > l.cfg.Limit {
-		return Result{
-			Allowed:    false,
-			Remaining:  0,
-			RetryAfter: time.Until(resetAt),
-			ResetAt:    resetAt,
-		}, nil
-	}
-	return Result{Allowed: true, Remaining: l.cfg.Limit - count, ResetAt: resetAt}, nil
-}
-
-// tokenBucket is a thin wrapper that delegates to fixedWindow with burst support.
-// A proper token-bucket would use a Lua script; this approximation is sufficient
-// for most API-gateway use cases.
-func (l *Limiter) tokenBucket(ctx context.Context, key string) (Result, error) {
-	orig := l.cfg.Limit
-	l.cfg.Limit = l.cfg.Burst
-	r, err := l.fixedWindow(ctx, key)
-	l.cfg.Limit = orig
-	return r, err
-}
+	pipe.ZAdd(ctx, rkey, redis.Z{Score: float64(now.UnixMicro()), Member: now.UnixNano()}
