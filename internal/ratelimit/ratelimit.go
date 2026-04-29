@@ -65,7 +65,12 @@ func New(client redis.Cmdable, cfg Config) *Limiter {
 		cfg.Limit = 30
 	}
 	if cfg.Burst == 0 {
-		cfg.Burst = cfg.Limit
+		// Cap burst at half the limit to avoid thundering-herd spikes.
+		// Upstream sets this to cfg.Limit, which felt too permissive for my use.
+		cfg.Burst = cfg.Limit / 2
+		if cfg.Burst == 0 {
+			cfg.Burst = 1 // always allow at least 1 burst token
+		}
 	}
 	return &Limiter{cfg: cfg, client: client}
 }
@@ -94,8 +99,4 @@ func (l *Limiter) slidingWindow(ctx context.Context, key string) (Result, error)
 
 	pipe := l.client.Pipeline()
 	// Remove entries outside the window.
-	pipe.ZRemRangeByScore(ctx, rkey, "0", fmt.Sprintf("%d", windowStart.UnixMicro()))
-	// Count remaining entries.
-	countCmd := pipe.ZCard(ctx, rkey)
-	// Add current request.
-	pipe.ZAdd(ctx, rkey, redis.Z{Score: float64(now.UnixMicro()), Member: now.UnixNano()}
+	pipe.ZRemRangeByScore(ctx, rkey, "0
